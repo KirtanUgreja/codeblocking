@@ -1,74 +1,40 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
-:root {
-  /* Neo Dark Color System */
+@theme {
+  --color-background: hsl(240 10% 4%);
+  --color-foreground: hsl(0 0% 98%);
 
-  /* Core Backgrounds */
-  --bg-app: #0e0b1e;
-  /* App base */
-  --bg-editor: #0f0c24;
-  /* Editor background */
-  --bg-sidebar: #14102d;
-  /* Sidebar background */
-  --bg-panel: #120f2a;
-  /* Panel background */
-  --bg-tab-bar: #18143a;
-  /* Tab bar */
-  --bg-float: rgba(24, 20, 58, 0.85);
-  /* Floating panels */
+  --color-card: hsl(240 10% 6%);
+  --color-card-foreground: hsl(0 0% 98%);
 
-  /* Borders */
-  --bg-border: rgba(124, 92, 255, 0.15);
-  /* 1px translucent border */
-  --bg-border-active: #6f5bff;
-  /* Active border */
+  --color-popover: hsl(240 10% 6%);
+  --color-popover-foreground: hsl(0 0% 98%);
 
-  /* Glow & Accents */
-  --accent-primary: #7c5cff;
-  /* Primary glow */
-  --accent-secondary: #a48bff;
-  /* Secondary glow */
-  --glow-primary: 0 0 15px rgba(124, 92, 255, 0.25);
-  --glow-strong: 0 0 20px rgba(124, 92, 255, 0.4);
-  --focus-ring: rgba(124, 92, 255, 0.6);
+  --color-primary: hsl(217 91% 60%);
+  --color-primary-foreground: hsl(0 0% 98%);
 
-  /* Text Colors */
-  --text-primary: #e6e6f0;
-  /* Primary text */
-  --text-secondary: #b6b4d8;
-  /* Secondary text */
-  --text-muted: #7c7aa5;
-  /* Muted text */
-  --text-disabled: #55537a;
-  /* Disabled text */
+  --color-secondary: hsl(240 4% 16%);
+  --color-secondary-foreground: hsl(0 0% 98%);
 
-  /* Status Colors (Softened) */
-  --color-error: #ff5c5c;
-  --color-success: #5cffbe;
-  --color-warning: #ffd05c;
-  --color-info: #5caaff;
+  --color-muted: hsl(240 4% 16%);
+  --color-muted-foreground: hsl(240 5% 65%);
 
-  /* Typography */
-  --font-family: 'JetBrains Mono', 'Fira Code', 'Inter', monospace;
+  --color-accent: hsl(240 4% 16%);
+  --color-accent-foreground: hsl(0 0% 98%);
+
+  --color-destructive: hsl(0 63% 31%);
+  --color-destructive-foreground: hsl(0 0% 98%);
+
+  --color-border: hsl(240 6% 15%);
+  --color-input: hsl(240 6% 15%);
+  --color-ring: hsl(217 91% 60%);
+
+  --radius-sm: calc(0.5rem - 4px);
+  --radius-md: calc(0.5rem - 2px);
+  --radius-lg: 0.5rem;
 }
 
-body {
-  background-color: var(--bg-app);
-  color: var(--text-primary);
-  font-family: var(--font-family);
-  font-size: 13px;
-  line-height: 1.55;
-  margin: 0;
-  padding: 0;
-  height: 100vh;
-  width: 100vw;
-  overflow: hidden;
-  -webkit-font-smoothing: antialiased;
-}
-
-/* Scrollbar Styling */
+/* Custom Scrollbar */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -79,37 +45,25 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(124, 92, 255, 0.15);
+  background: var(--color-border);
   border-radius: 5px;
-  border: 2px solid transparent;
-  background-clip: content-box;
+  border: 2px solid var(--color-background);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background-color: rgba(124, 92, 255, 0.3);
+  background: var(--color-muted-foreground);
 }
 
-::-webkit-scrollbar-corner {
-  background: transparent;
+/* Glassmorphism utilities */
+.glass {
+  @apply bg-background/80 backdrop-blur-md border border-white/10;
 }
 
-/* Selection */
-::selection {
-  background: rgba(124, 92, 255, 0.25);
-  color: var(--text-primary);
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
 }
 
-/* Utility Animations */
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-  }
-
-  to {
-    opacity: 1;
-  }
-}
-
-.fade-in {
-  animation: fadeIn 0.12s ease-out;
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }

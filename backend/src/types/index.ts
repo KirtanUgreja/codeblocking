@@ -1,46 +1,27 @@
-// File system types
-export interface WebSocketMessage {
-    type: string;
-    terminalId?: string;
-    data?: string;
-    exitCode?: number;
-    cols?: number;
-    rows?: number;
-}
+// Type definitions for the IDE backend
 
 export interface FileNode {
+    id: string;
     name: string;
+    type: 'file' | 'folder';
     path: string;
-    isDirectory: boolean;
     children?: FileNode[];
 }
 
 export interface FileContent {
     path: string;
     content: string;
+    language: string;
 }
 
-// Terminal types
-export interface TerminalMessage {
-    type: 'output' | 'error' | 'exit';
-    data: string;
-    exitCode?: number;
-}
-
-// Execution types
-export interface ExecutionRequest {
-    filePath: string;
-    command?: string;
-}
-
-export interface ExecutionResponse {
+export interface ApiResponse<T = any> {
     success: boolean;
-    message: string;
-    processId?: string;
+    data?: T;
+    error?: string;
+    message?: string;
 }
 
-export interface ExecutionOutput {
-    type: 'stdout' | 'stderr' | 'exit';
-    data: string;
-    exitCode?: number;
+export interface TerminalSession {
+    id: string;
+    createdAt: Date;
 }
