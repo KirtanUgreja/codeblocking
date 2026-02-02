@@ -1,8 +1,22 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
+# Dependencies
+node_modules/
+**/node_modules/
+
 # Agent and AI directories
 .agent/
 .gemini/
+
+# Environment files
+.env
+.env.local
+.env*.local
+
+# Build outputs
+dist/
+build/
+.next/
 
 #Other
 .vscode
