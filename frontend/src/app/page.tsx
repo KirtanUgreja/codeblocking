@@ -1,9 +1,14 @@
-import IdeLayout from "@/components/layout/IdeLayout";
+import { redirect } from 'next/navigation'
+import { createClient } from '@/lib/supabase/server'
 
-export default function Home() {
-  return (
-    <main className="h-screen w-screen overflow-hidden bg-background">
-      <IdeLayout />
-    </main>
-  );
+export default async function Home() {
+  const supabase = await createClient()
+
+  const { data: { user } } = await supabase.auth.getUser()
+
+  if (user) {
+    redirect('/dashboard')
+  } else {
+    redirect('/login')
+  }
 }

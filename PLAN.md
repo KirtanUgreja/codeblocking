@@ -514,8 +514,8 @@ PHASE 3: Docker Integration (Week 3-4)
 ├── Docker
 │   ├── python.Dockerfile
 │   ├── node.Dockerfile
-│   ├── multi.Dockerfile
-│   └── base.Dockerfile
+│   ├── java.Dockerfile
+│   └── ubuntu/linux.Dockerfile
 └── Backend
     ├── Container service
     └── Updated terminal service

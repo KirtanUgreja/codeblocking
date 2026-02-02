@@ -2,7 +2,6 @@
 
 import fs from 'fs/promises';
 import path from 'path';
-import { Dirent } from 'fs';
 
 export interface FileNode {
     id: string;
@@ -18,12 +17,11 @@ export interface FileContent {
     language: string;
 }
 
-class FileSystemService {
+export class FileSystemService {
     private workspaceRoot: string;
 
-    constructor(workspaceRoot?: string) {
-        // Use a sandboxed workspace directory
-        this.workspaceRoot = workspaceRoot || path.join(process.cwd(), 'workspace');
+    constructor(workspaceRoot: string) {
+        this.workspaceRoot = workspaceRoot;
     }
 
     /**
@@ -34,26 +32,6 @@ class FileSystemService {
             await fs.access(this.workspaceRoot);
         } catch {
             await fs.mkdir(this.workspaceRoot, { recursive: true });
-            // Create a sample project structure
-            await this.createSampleProject();
-        }
-    }
-
-    /**
-     * Create a sample project for demonstration
-     */
-    private async createSampleProject(): Promise<void> {
-        const sampleFiles = [
-            { path: 'src/index.ts', content: '// Welcome to CodeBlocking IDE!\nconsole.log("Hello, World!");\n' },
-            { path: 'src/utils.ts', content: '// Utility functions\nexport const add = (a: number, b: number) => a + b;\n' },
-            { path: 'package.json', content: JSON.stringify({ name: 'my-project', version: '1.0.0', main: 'src/index.ts' }, null, 2) },
-            { path: 'README.md', content: '# My Project\n\nWelcome to your new project!\n' },
-        ];
-
-        for (const file of sampleFiles) {
-            const filePath = path.join(this.workspaceRoot, file.path);
-            await fs.mkdir(path.dirname(filePath), { recursive: true });
-            await fs.writeFile(filePath, file.content, 'utf-8');
         }
     }
 
@@ -68,8 +46,12 @@ class FileSystemService {
             const nodes: FileNode[] = [];
 
             for (const entry of entries) {
-                // Skip hidden files and node_modules
-                if (entry.name.startsWith('.') || entry.name === 'node_modules') {
+                // Skip hidden files, node_modules, __pycache__
+                if (entry.name.startsWith('.') ||
+                    entry.name === 'node_modules' ||
+                    entry.name === '__pycache__' ||
+                    entry.name === 'target' ||
+                    entry.name === 'build') {
                     continue;
                 }
 
@@ -106,7 +88,8 @@ class FileSystemService {
         const fullPath = path.join(this.workspaceRoot, filePath);
 
         // Security: Prevent path traversal
-        if (!fullPath.startsWith(this.workspaceRoot)) {
+        const normalizedPath = path.normalize(fullPath);
+        if (!normalizedPath.startsWith(this.workspaceRoot)) {
             throw new Error('Access denied: Path traversal detected');
         }
 
@@ -126,8 +109,8 @@ class FileSystemService {
     async writeFile(filePath: string, content: string): Promise<void> {
         const fullPath = path.join(this.workspaceRoot, filePath);
 
-        // Security: Prevent path traversal
-        if (!fullPath.startsWith(this.workspaceRoot)) {
+        const normalizedPath = path.normalize(fullPath);
+        if (!normalizedPath.startsWith(this.workspaceRoot)) {
             throw new Error('Access denied: Path traversal detected');
         }
 
@@ -149,7 +132,8 @@ class FileSystemService {
     async createFolder(folderPath: string): Promise<void> {
         const fullPath = path.join(this.workspaceRoot, folderPath);
 
-        if (!fullPath.startsWith(this.workspaceRoot)) {
+        const normalizedPath = path.normalize(fullPath);
+        if (!normalizedPath.startsWith(this.workspaceRoot)) {
             throw new Error('Access denied: Path traversal detected');
         }
 
@@ -162,7 +146,8 @@ class FileSystemService {
     async delete(itemPath: string): Promise<void> {
         const fullPath = path.join(this.workspaceRoot, itemPath);
 
-        if (!fullPath.startsWith(this.workspaceRoot)) {
+        const normalizedPath = path.normalize(fullPath);
+        if (!normalizedPath.startsWith(this.workspaceRoot)) {
             throw new Error('Access denied: Path traversal detected');
         }
 
@@ -172,20 +157,6 @@ class FileSystemService {
         } else {
             await fs.unlink(fullPath);
         }
-    }
-
-    /**
-     * Rename a file or folder
-     */
-    async rename(oldPath: string, newPath: string): Promise<void> {
-        const fullOldPath = path.join(this.workspaceRoot, oldPath);
-        const fullNewPath = path.join(this.workspaceRoot, newPath);
-
-        if (!fullOldPath.startsWith(this.workspaceRoot) || !fullNewPath.startsWith(this.workspaceRoot)) {
-            throw new Error('Access denied: Path traversal detected');
-        }
-
-        await fs.rename(fullOldPath, fullNewPath);
     }
 
     /**
@@ -204,16 +175,22 @@ class FileSystemService {
             '.html': 'html',
             '.md': 'markdown',
             '.py': 'python',
-            '.go': 'go',
-            '.rs': 'rust',
             '.java': 'java',
             '.c': 'c',
             '.cpp': 'cpp',
             '.h': 'c',
             '.hpp': 'cpp',
+            '.xml': 'xml',
+            '.yaml': 'yaml',
+            '.yml': 'yaml',
+            '.sh': 'shellscript',
+            '.bash': 'shellscript',
         };
         return languageMap[ext] || 'plaintext';
     }
 }
 
-export const fileSystemService = new FileSystemService();
+// Factory function to create service for specific project
+export function createFileSystemService(projectRoot: string): FileSystemService {
+    return new FileSystemService(projectRoot);
+}

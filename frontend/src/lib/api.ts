@@ -25,19 +25,30 @@ interface FileContent {
 
 class ApiClient {
     private baseUrl: string;
+    private authToken: string | null = null;
 
     constructor(baseUrl: string = API_BASE) {
         this.baseUrl = baseUrl;
     }
 
+    setAuthToken(token: string | null): void {
+        this.authToken = token;
+    }
+
     private async fetch<T>(endpoint: string, options?: RequestInit): Promise<ApiResponse<T>> {
         try {
+            const headers: Record<string, string> = {
+                'Content-Type': 'application/json',
+                ...options?.headers as Record<string, string>,
+            };
+
+            if (this.authToken) {
+                headers['Authorization'] = `Bearer ${this.authToken}`;
+            }
+
             const response = await fetch(`${this.baseUrl}${endpoint}`, {
                 ...options,
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...options?.headers,
-                },
+                headers,
             });
             return await response.json();
         } catch (error) {
@@ -46,47 +57,40 @@ class ApiClient {
         }
     }
 
-    // File System API
+    // File System API (project-specific)
 
-    async getFileTree(): Promise<ApiResponse<FileNode[]>> {
-        return this.fetch<FileNode[]>('/api/files/tree');
+    async getFileTree(projectId: string): Promise<ApiResponse<FileNode[]>> {
+        return this.fetch<FileNode[]>(`/api/files/tree/${projectId}`);
     }
 
-    async readFile(path: string): Promise<ApiResponse<FileContent>> {
-        return this.fetch<FileContent>(`/api/files/read?path=${encodeURIComponent(path)}`);
+    async readFile(projectId: string, path: string): Promise<ApiResponse<FileContent>> {
+        return this.fetch<FileContent>(`/api/files/${projectId}/read?path=${encodeURIComponent(path)}`);
     }
 
-    async writeFile(path: string, content: string): Promise<ApiResponse<void>> {
-        return this.fetch<void>('/api/files/write', {
+    async writeFile(projectId: string, path: string, content: string): Promise<ApiResponse<void>> {
+        return this.fetch<void>(`/api/files/${projectId}/write`, {
             method: 'POST',
             body: JSON.stringify({ path, content }),
         });
     }
 
-    async createFile(path: string): Promise<ApiResponse<void>> {
-        return this.fetch<void>('/api/files/create', {
+    async createFile(projectId: string, path: string): Promise<ApiResponse<void>> {
+        return this.fetch<void>(`/api/files/${projectId}/create`, {
             method: 'POST',
             body: JSON.stringify({ path, type: 'file' }),
         });
     }
 
-    async createFolder(path: string): Promise<ApiResponse<void>> {
-        return this.fetch<void>('/api/files/create', {
+    async createFolder(projectId: string, path: string): Promise<ApiResponse<void>> {
+        return this.fetch<void>(`/api/files/${projectId}/create`, {
             method: 'POST',
             body: JSON.stringify({ path, type: 'folder' }),
         });
     }
 
-    async deleteItem(path: string): Promise<ApiResponse<void>> {
-        return this.fetch<void>(`/api/files/delete?path=${encodeURIComponent(path)}`, {
+    async deleteItem(projectId: string, path: string): Promise<ApiResponse<void>> {
+        return this.fetch<void>(`/api/files/${projectId}/delete?path=${encodeURIComponent(path)}`, {
             method: 'DELETE',
-        });
-    }
-
-    async renameItem(oldPath: string, newPath: string): Promise<ApiResponse<void>> {
-        return this.fetch<void>('/api/files/rename', {
-            method: 'POST',
-            body: JSON.stringify({ oldPath, newPath }),
         });
     }
 

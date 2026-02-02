@@ -1,18 +1,25 @@
-// File System Routes - API endpoints for file operations
+// Files routes - API for file operations
 
 import { Router, Request, Response } from 'express';
-import { fileSystemService } from '../services/fileSystem';
+import { createFileSystemService } from '../services/fileSystem';
+import { getProjectPath } from '../services/git';
 
 const router = Router();
 
-/**
- * GET /api/files/tree
- * Get the complete file tree
- */
-router.get('/tree', async (req: Request, res: Response) => {
+// Helper to get file system service for a project
+function getFileService(projectId: string) {
+    const projectPath = getProjectPath(projectId);
+    return createFileSystemService(projectPath);
+}
+
+// Get file tree for a project
+router.get('/tree/:projectId', async (req: Request, res: Response) => {
     try {
-        await fileSystemService.ensureWorkspace();
-        const tree = await fileSystemService.getFileTree();
+        const { projectId } = req.params;
+        const fileService = getFileService(projectId);
+        await fileService.ensureWorkspace();
+        const tree = await fileService.getFileTree();
+
         res.json({ success: true, data: tree });
     } catch (error) {
         console.error('Error getting file tree:', error);
@@ -20,108 +27,92 @@ router.get('/tree', async (req: Request, res: Response) => {
     }
 });
 
-/**
- * GET /api/files/read
- * Read file content
- * Query: path - file path relative to workspace
- */
-router.get('/read', async (req: Request, res: Response) => {
+// Read file content
+router.get('/:projectId/read', async (req: Request, res: Response) => {
     try {
-        const filePath = req.query.path as string;
-        if (!filePath) {
-            return res.status(400).json({ success: false, error: 'File path is required' });
+        const { projectId } = req.params;
+        const { path: filePath } = req.query;
+
+        if (!filePath || typeof filePath !== 'string') {
+            return res.status(400).json({ success: false, error: 'Path is required' });
         }
 
-        const fileContent = await fileSystemService.readFile(filePath);
-        res.json({ success: true, data: fileContent });
-    } catch (error) {
+        const fileService = getFileService(projectId);
+        const content = await fileService.readFile(filePath);
+
+        res.json({ success: true, data: content });
+    } catch (error: unknown) {
         console.error('Error reading file:', error);
-        res.status(500).json({ success: false, error: 'Failed to read file' });
+        const message = error instanceof Error ? error.message : 'Failed to read file';
+        res.status(500).json({ success: false, error: message });
     }
 });
 
-/**
- * POST /api/files/write
- * Write content to a file
- * Body: { path: string, content: string }
- */
-router.post('/write', async (req: Request, res: Response) => {
+// Write file content
+router.post('/:projectId/write', async (req: Request, res: Response) => {
     try {
+        const { projectId } = req.params;
         const { path: filePath, content } = req.body;
+
         if (!filePath) {
-            return res.status(400).json({ success: false, error: 'File path is required' });
+            return res.status(400).json({ success: false, error: 'Path is required' });
         }
 
-        await fileSystemService.writeFile(filePath, content || '');
-        res.json({ success: true, message: 'File saved successfully' });
-    } catch (error) {
+        const fileService = getFileService(projectId);
+        await fileService.writeFile(filePath, content || '');
+
+        res.json({ success: true, message: 'File saved' });
+    } catch (error: unknown) {
         console.error('Error writing file:', error);
-        res.status(500).json({ success: false, error: 'Failed to write file' });
+        const message = error instanceof Error ? error.message : 'Failed to write file';
+        res.status(500).json({ success: false, error: message });
     }
 });
 
-/**
- * POST /api/files/create
- * Create a new file or folder
- * Body: { path: string, type: 'file' | 'folder' }
- */
-router.post('/create', async (req: Request, res: Response) => {
+// Create file or folder
+router.post('/:projectId/create', async (req: Request, res: Response) => {
     try {
+        const { projectId } = req.params;
         const { path: itemPath, type } = req.body;
-        if (!itemPath || !type) {
-            return res.status(400).json({ success: false, error: 'Path and type are required' });
-        }
 
-        if (type === 'folder') {
-            await fileSystemService.createFolder(itemPath);
-        } else {
-            await fileSystemService.createFile(itemPath);
-        }
-
-        res.json({ success: true, message: `${type} created successfully` });
-    } catch (error) {
-        console.error('Error creating item:', error);
-        res.status(500).json({ success: false, error: 'Failed to create item' });
-    }
-});
-
-/**
- * DELETE /api/files/delete
- * Delete a file or folder
- * Query: path - item path relative to workspace
- */
-router.delete('/delete', async (req: Request, res: Response) => {
-    try {
-        const itemPath = req.query.path as string;
         if (!itemPath) {
             return res.status(400).json({ success: false, error: 'Path is required' });
         }
 
-        await fileSystemService.delete(itemPath);
-        res.json({ success: true, message: 'Item deleted successfully' });
-    } catch (error) {
-        console.error('Error deleting item:', error);
-        res.status(500).json({ success: false, error: 'Failed to delete item' });
+        const fileService = getFileService(projectId);
+
+        if (type === 'folder') {
+            await fileService.createFolder(itemPath);
+        } else {
+            await fileService.createFile(itemPath);
+        }
+
+        res.json({ success: true, message: `${type || 'file'} created` });
+    } catch (error: unknown) {
+        console.error('Error creating item:', error);
+        const message = error instanceof Error ? error.message : 'Failed to create item';
+        res.status(500).json({ success: false, error: message });
     }
 });
 
-/**
- * POST /api/files/rename
- * Rename a file or folder
- * Body: { oldPath: string, newPath: string }
- */
-router.post('/rename', async (req: Request, res: Response) => {
+// Delete file or folder
+router.delete('/:projectId/delete', async (req: Request, res: Response) => {
     try {
-        const { oldPath, newPath } = req.body;
-        if (!oldPath || !newPath) {
-            return res.status(400).json({ success: false, error: 'Old path and new path are required' });
+        const { projectId } = req.params;
+        const { path: itemPath } = req.query;
+
+        if (!itemPath || typeof itemPath !== 'string') {
+            return res.status(400).json({ success: false, error: 'Path is required' });
         }
 
-        await fileSystemService.rename(oldPath, newPath);
-        res.json({ success: true, message: 'Item renamed successfully' });
-    } catch (error) {
-        console.error('Error renaming item:', error);
-        res.status(500).json({ success: false, error: 'Failed to rename item' });
+        const fileService = getFileService(projectId);
+        await fileService.delete(itemPath);
+
+        res.json({ success: true, message: 'Item deleted' });
+    } catch (error: unknown) {
+        console.error('Error deleting item:', error);
+        const message = error instanceof Error ? error.message : 'Failed to delete item';
+        res.status(500).json({ success: false, error: message });
     }
 });
 

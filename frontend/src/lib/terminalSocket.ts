@@ -9,17 +9,31 @@ class TerminalSocket {
     private onDataCallback: ((data: string) => void) | null = null;
     private onReadyCallback: (() => void) | null = null;
     private onExitCallback: ((info: { exitCode: number; signal?: string }) => void) | null = null;
+    private projectId: string | null = null;
+    private authToken: string | null = null;
+    private environment: string = 'base';
+
+    setAuth(projectId: string, authToken: string, environment?: string): void {
+        this.projectId = projectId;
+        this.authToken = authToken;
+        this.environment = environment || 'base';
+    }
 
     connect(): void {
         if (this.socket?.connected) return;
 
         this.socket = io(SOCKET_URL, {
             transports: ['websocket', 'polling'],
+            auth: {
+                token: this.authToken,
+                projectId: this.projectId,
+                environment: this.environment,
+            },
         });
 
         this.socket.on('connect', () => {
             console.log('Terminal socket connected');
-            this.socket?.emit('terminal:create');
+            this.socket?.emit('terminal:create', { projectId: this.projectId });
         });
 
         this.socket.on('terminal:ready', () => {
@@ -36,8 +50,8 @@ class TerminalSocket {
             this.onExitCallback?.(info);
         });
 
-        this.socket.on('terminal:error', (error: { message: string }) => {
-            console.error('Terminal error:', error);
+        this.socket.on('terminal:error', (error: { message?: string }) => {
+            console.error('Terminal error:', error?.message || 'Unknown error', error);
         });
 
         this.socket.on('disconnect', () => {

@@ -2,6 +2,10 @@ import { create } from 'zustand';
 import { api, FileNode } from '@/lib/api';
 
 interface IdeState {
+    // Project context
+    projectId: string | null;
+    setProjectId: (id: string) => void;
+
     // File System
     fileTree: FileNode[];
     isLoadingFiles: boolean;
@@ -36,14 +40,20 @@ interface IdeState {
 }
 
 export const useIdeStore = create<IdeState>((set, get) => ({
+    projectId: null,
+    setProjectId: (id) => set({ projectId: id }),
+
     fileTree: [],
     isLoadingFiles: false,
     setFileTree: (tree) => set({ fileTree: tree }),
 
     fetchFileTree: async () => {
+        const { projectId } = get();
+        if (!projectId) return;
+
         set({ isLoadingFiles: true });
         try {
-            const response = await api.getFileTree();
+            const response = await api.getFileTree(projectId);
             if (response.success && response.data) {
                 set({ fileTree: response.data, isBackendConnected: true });
             }
@@ -97,8 +107,11 @@ export const useIdeStore = create<IdeState>((set, get) => ({
     }),
 
     fetchFileContent: async (filePath) => {
+        const { projectId } = get();
+        if (!projectId) return;
+
         try {
-            const response = await api.readFile(filePath);
+            const response = await api.readFile(projectId, filePath);
             if (response.success && response.data) {
                 set({
                     activeFileContent: response.data.content,
@@ -112,10 +125,10 @@ export const useIdeStore = create<IdeState>((set, get) => ({
 
     saveActiveFile: async () => {
         const state = get();
-        if (!state.activeFile) return;
+        if (!state.activeFile || !state.projectId) return;
 
         try {
-            const response = await api.writeFile(state.activeFile, state.activeFileContent);
+            const response = await api.writeFile(state.projectId, state.activeFile, state.activeFileContent);
             if (response.success) {
                 const newUnsaved = new Set(state.unsavedFiles);
                 newUnsaved.delete(state.activeFile);

@@ -1,98 +1,73 @@
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import { createServer } from 'http';
-import { Server as SocketIOServer } from 'socket.io';
+import 'dotenv/config'
+import express from 'express'
+import cors from 'cors'
+import { createServer } from 'http'
+import { Server as SocketIOServer } from 'socket.io'
+import githubRoutes from './routes/github.js'
+import projectsRoutes from './routes/projects.js'
+import filesRoutes from './routes/files.js'
+import { initializeTerminalService, getActiveSessionCount, cleanupTerminals } from './services/terminal.js'
+import { cleanupAllContainers } from './services/container.js'
 
-// Load environment variables
-dotenv.config();
-
-// Import routes
-import filesRouter from './routes/files';
-
-// Import services
-import { terminalService } from './services/terminal';
-import { fileSystemService } from './services/fileSystem';
-
-const app = express();
-const httpServer = createServer(app);
-const PORT = process.env.PORT || 3001;
+const app = express()
+const httpServer = createServer(app)
+const PORT = process.env.PORT || 3001
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000'
 
 // Socket.IO setup
 const io = new SocketIOServer(httpServer, {
     cors: {
-        origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+        origin: FRONTEND_URL,
         methods: ['GET', 'POST'],
         credentials: true
-    }
-});
+    },
+    transports: ['websocket', 'polling']
+})
 
 // Initialize terminal service with Socket.IO
-terminalService.initialize(io);
+initializeTerminalService(io)
 
 // Middleware
 app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: FRONTEND_URL,
     credentials: true
-}));
-app.use(express.json());
+}))
+app.use(express.json())
 
-// Request logging middleware
-app.use((req, res, next) => {
-    console.log(`${new Date().toISOString()} ${req.method} ${req.path}`);
-    next();
-});
-
-// Health check endpoint
-app.get('/', (req, res) => {
-    res.json({
-        message: 'CodeBlocking IDE API',
-        version: '1.0.0',
-        status: 'healthy'
-    });
-});
-
-// API routes
-app.use('/api/files', filesRouter);
-
-// API health check
-app.get('/api/health', (req, res) => {
+// Health check
+app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
-        terminals: terminalService.getActiveSessionCount()
-    });
-});
+        terminals: getActiveSessionCount()
+    })
+})
 
-// Error handling middleware
+// API Routes
+app.use('/api/github', githubRoutes)
+app.use('/api/projects', projectsRoutes)
+app.use('/api/files', filesRoutes)
+
+// Error handling
 app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    console.error('Unhandled error:', err);
-    res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-        message: process.env.NODE_ENV === 'development' ? err.message : undefined
-    });
-});
+    console.error('Unhandled error:', err)
+    res.status(500).json({ error: 'Internal server error' })
+})
 
-// Initialize workspace and start server
-async function startServer() {
-    try {
-        // Ensure workspace directory exists
-        await fileSystemService.ensureWorkspace();
-        console.log('✓ Workspace initialized');
-
-        // Start the HTTP server
-        httpServer.listen(PORT, () => {
-            console.log(`🚀 Server running on http://localhost:${PORT}`);
-            console.log(`📁 File API: http://localhost:${PORT}/api/files`);
-            console.log(`🔌 Terminal WebSocket: ws://localhost:${PORT}`);
-        });
-    } catch (error) {
-        console.error('Failed to start server:', error);
-        process.exit(1);
-    }
+// Graceful shutdown
+async function shutdown() {
+    console.log('\nShutting down...')
+    await cleanupTerminals()
+    await cleanupAllContainers()
+    process.exit(0)
 }
 
-startServer();
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)
 
-export default app;
+// Start server
+httpServer.listen(PORT, () => {
+    console.log(`🚀 Backend server running on http://localhost:${PORT}`)
+    console.log(`   Frontend URL: ${FRONTEND_URL}`)
+    console.log(`   Socket.IO enabled for terminal connections`)
+})

@@ -1,115 +1,166 @@
-// Terminal Service - Manages PTY instances for terminal emulation
-
-import * as pty from 'node-pty';
+// Terminal service for managing Docker container terminals via Socket.IO
 import { Server as SocketIOServer, Socket } from 'socket.io';
+import Docker from 'dockerode';
+import { Duplex } from 'stream';
+import path from 'path';
 import os from 'os';
+import fs from 'fs';
+import { spawnContainer, getContainer, stopContainer } from './container';
+import { getProjectPath } from './git';
+
+// Auto-detect Docker socket (Docker Desktop uses a different path on Linux)
+function getDockerSocket(): string {
+    const homeDir = os.homedir();
+    const desktopSocket = path.join(homeDir, '.docker/desktop/docker.sock');
+
+    if (fs.existsSync(desktopSocket)) {
+        return desktopSocket;
+    }
+
+    return '/var/run/docker.sock';
+}
+
+const docker = new Docker({ socketPath: getDockerSocket() });
 
 interface TerminalSession {
-    pty: pty.IPty;
+    userId: string;
+    projectId: string;
+    exec: Docker.Exec;
+    stream: Duplex | null;
     socket: Socket;
 }
 
-class TerminalService {
-    private sessions: Map<string, TerminalSession> = new Map();
-    private io: SocketIOServer | null = null;
+const sessions: Map<string, TerminalSession> = new Map();
 
-    /**
-     * Initialize the terminal service with Socket.IO
-     */
-    initialize(io: SocketIOServer): void {
-        this.io = io;
+export function initializeTerminalService(io: SocketIOServer): void {
+    io.on('connection', (socket: Socket) => {
+        console.log('Terminal socket connected:', socket.id);
 
-        io.on('connection', (socket: Socket) => {
-            console.log(`Client connected: ${socket.id}`);
+        socket.on('terminal:create', async (data: { projectId: string }) => {
+            try {
+                // Get user info from socket auth
+                const userId = socket.handshake.auth?.userId || 'anonymous';
+                const projectId = data.projectId;
 
-            socket.on('terminal:create', () => this.createTerminal(socket));
-            socket.on('terminal:input', (data: string) => this.handleInput(socket.id, data));
-            socket.on('terminal:resize', (data: { cols: number; rows: number }) => this.handleResize(socket.id, data));
-            socket.on('disconnect', () => this.handleDisconnect(socket.id));
+                if (!projectId) {
+                    socket.emit('terminal:error', { message: 'Project ID required' });
+                    return;
+                }
+
+                // Get project path and environment
+                const projectPath = getProjectPath(projectId);
+
+                // Get or spawn container
+                let containerInfo = await getContainer(userId, projectId);
+
+                if (!containerInfo) {
+                    // Need project environment - default to 'base'
+                    const environment = socket.handshake.auth?.environment || 'base';
+                    containerInfo = await spawnContainer(userId, projectId, environment, projectPath);
+                }
+
+                const container = docker.getContainer(containerInfo.containerId);
+
+                // Create exec session for terminal
+                const exec = await container.exec({
+                    Cmd: ['/bin/bash'],
+                    AttachStdin: true,
+                    AttachStdout: true,
+                    AttachStderr: true,
+                    Tty: true,
+                });
+
+                const stream = await exec.start({
+                    hijack: true,
+                    stdin: true,
+                    Tty: true,
+                });
+
+                // Store session
+                sessions.set(socket.id, {
+                    userId,
+                    projectId,
+                    exec,
+                    stream,
+                    socket,
+                });
+
+                // Forward container output to client
+                stream.on('data', (chunk: Buffer) => {
+                    socket.emit('terminal:output', chunk.toString());
+                });
+
+                stream.on('end', () => {
+                    socket.emit('terminal:exit', { exitCode: 0 });
+                    sessions.delete(socket.id);
+                });
+
+                stream.on('error', (err: Error | unknown) => {
+                    const errorMessage = err instanceof Error
+                        ? err.message
+                        : typeof err === 'string'
+                            ? err
+                            : 'Unknown terminal stream error';
+                    console.error('Terminal stream error:', err);
+                    socket.emit('terminal:error', { message: errorMessage || 'Stream error occurred' });
+                });
+
+                // Send port info to client
+                const ports: Record<number, number> = {};
+                containerInfo.ports.forEach((hostPort, containerPort) => {
+                    ports[containerPort] = hostPort;
+                });
+
+                socket.emit('terminal:ready', { ports });
+                console.log(`Terminal created for ${userId}/${projectId}`);
+            } catch (error) {
+                const errorMessage = error instanceof Error
+                    ? error.message
+                    : typeof error === 'string'
+                        ? error
+                        : 'Failed to create terminal';
+                console.error('Error creating terminal:', error);
+                socket.emit('terminal:error', { message: errorMessage });
+            }
         });
-    }
 
-    /**
-     * Create a new terminal session
-     */
-    private createTerminal(socket: Socket): void {
-        const shell = os.platform() === 'win32' ? 'powershell.exe' : process.env.SHELL || 'bash';
-        const workspaceDir = process.env.WORKSPACE_DIR || process.cwd() + '/workspace';
+        socket.on('terminal:input', (data: string) => {
+            const session = sessions.get(socket.id);
+            if (session?.stream) {
+                session.stream.write(data);
+            }
+        });
 
-        try {
-            const ptyProcess = pty.spawn(shell, [], {
-                name: 'xterm-256color',
-                cols: 80,
-                rows: 24,
-                cwd: workspaceDir,
-                env: {
-                    ...process.env,
-                    TERM: 'xterm-256color',
-                } as { [key: string]: string },
-            });
+        socket.on('terminal:resize', (data: { cols: number; rows: number }) => {
+            const session = sessions.get(socket.id);
+            if (session?.exec) {
+                // Docker exec resize
+                session.exec.resize({ w: data.cols, h: data.rows }).catch((err) => {
+                    console.error('Error resizing terminal:', err);
+                });
+            }
+        });
 
-            // Store the session
-            this.sessions.set(socket.id, { pty: ptyProcess, socket });
+        socket.on('disconnect', () => {
+            const session = sessions.get(socket.id);
+            if (session) {
+                session.stream?.end();
+                sessions.delete(socket.id);
+                console.log('Terminal disconnected:', socket.id);
+            }
+        });
+    });
 
-            // Send terminal output to client
-            ptyProcess.onData((data: string) => {
-                socket.emit('terminal:output', data);
-            });
-
-            // Handle terminal exit
-            ptyProcess.onExit(({ exitCode, signal }) => {
-                console.log(`Terminal exited: code=${exitCode}, signal=${signal}`);
-                socket.emit('terminal:exit', { exitCode, signal });
-                this.sessions.delete(socket.id);
-            });
-
-            // Send ready signal
-            socket.emit('terminal:ready');
-            console.log(`Terminal created for: ${socket.id}`);
-        } catch (error) {
-            console.error('Failed to create terminal:', error);
-            socket.emit('terminal:error', { message: 'Failed to create terminal' });
-        }
-    }
-
-    /**
-     * Handle input from client
-     */
-    private handleInput(socketId: string, data: string): void {
-        const session = this.sessions.get(socketId);
-        if (session) {
-            session.pty.write(data);
-        }
-    }
-
-    /**
-     * Handle terminal resize
-     */
-    private handleResize(socketId: string, { cols, rows }: { cols: number; rows: number }): void {
-        const session = this.sessions.get(socketId);
-        if (session) {
-            session.pty.resize(cols, rows);
-        }
-    }
-
-    /**
-     * Handle client disconnect
-     */
-    private handleDisconnect(socketId: string): void {
-        const session = this.sessions.get(socketId);
-        if (session) {
-            session.pty.kill();
-            this.sessions.delete(socketId);
-            console.log(`Terminal destroyed for: ${socketId}`);
-        }
-    }
-
-    /**
-     * Get active session count
-     */
-    getActiveSessionCount(): number {
-        return this.sessions.size;
-    }
+    console.log('Terminal service initialized');
 }
 
-export const terminalService = new TerminalService();
+export function getActiveSessionCount(): number {
+    return sessions.size;
+}
+
+export async function cleanupTerminals(): Promise<void> {
+    for (const [socketId, session] of sessions) {
+        session.stream?.end();
+        sessions.delete(socketId);
+    }
+}
