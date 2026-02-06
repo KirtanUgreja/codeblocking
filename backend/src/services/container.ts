@@ -14,23 +14,37 @@ function getDockerSocket(): string {
         return desktopSocket;
     }
 
+    // Check for Windows named pipe
+    if (os.platform() === 'win32') {
+        return '//./pipe/docker_engine';
+    }
+
     // Fallback to standard Docker socket
     return '/var/run/docker.sock';
 }
 
 const docker = new Docker({ socketPath: getDockerSocket() });
 
+export async function pingDocker(): Promise<boolean> {
+    try {
+        await docker.ping();
+        return true;
+    } catch (error) {
+        return false;
+    }
+}
+
 // Environment to Docker image mapping
-// Using custom codeblocking images (with fallbacks to public images if not built)
+// We use standard images to ensure broad compatibility without needing to build custom images
 const ENVIRONMENT_IMAGES: Record<string, string> = {
-    python: 'codeblocking/python',
-    node: 'codeblocking/node',
-    java: 'codeblocking/java',
-    base: 'codeblocking/base',
+    python: 'python:3.11-alpine',
+    node: 'node:20-alpine',
+    java: 'openjdk:17-alpine',
+    base: 'node:20-alpine',
 };
 
-// Port range for container bindings (3000-3010 for each user session)
-const PORT_RANGE_START = 3100;
+// Port range for container bindings (21000+ to avoid conflicts)
+const PORT_RANGE_START = 21000;
 const PORT_RANGE_SIZE = 10;
 
 interface ContainerInfo {
@@ -42,6 +56,8 @@ interface ContainerInfo {
 
 // Track active containers: userId-projectId -> ContainerInfo
 const activeContainers: Map<string, ContainerInfo> = new Map();
+// Track containers currently being spawned to prevent cleanup race conditions
+const pendingContainerIds: Set<string> = new Set();
 
 // Track used host ports
 const usedPorts: Set<number> = new Set();
@@ -104,6 +120,10 @@ export async function getContainer(userId: string, projectId: string): Promise<C
     return null;
 }
 
+export async function forceStopContainer(userId: string, projectId: string): Promise<void> {
+    await stopContainer(userId, projectId);
+}
+
 export async function spawnContainer(
     userId: string,
     projectId: string,
@@ -118,33 +138,88 @@ export async function spawnContainer(
         return existing;
     }
 
-    const imageName = ENVIRONMENT_IMAGES[environment] || ENVIRONMENT_IMAGES.base;
+    const imageName = ENVIRONMENT_IMAGES[environment] || 'node:20-alpine';
+
+    // Pull image if not exists
+    try {
+        await docker.getImage(imageName).inspect();
+    } catch (error) {
+        console.log(`Pulling image ${imageName}...`);
+        await new Promise((resolve, reject) => {
+            docker.pull(imageName, (err: any, stream: any) => {
+                if (err) return reject(err);
+                docker.modem.followProgress(stream, (err: any, output: any) => {
+                    if (err) return reject(err);
+                    console.log(`Image ${imageName} pulled successfully`);
+                    resolve(output);
+                });
+            });
+        });
+    }
 
     // Find available ports for common dev server ports
     const portBindings: Record<string, { HostPort: string }[]> = {};
     const ports = new Map<number, number>();
 
     // Bind ports 3000-3010 from container to available host ports
-    for (let containerPort = 3000; containerPort <= 3010; containerPort++) {
+    for (let containerPort = 5000; containerPort <= 5010; containerPort++) {
         const hostPort = await findAvailablePort();
         portBindings[`${containerPort}/tcp`] = [{ HostPort: hostPort.toString() }];
         ports.set(containerPort, hostPort);
     }
 
     // Ensure project directory exists and get absolute path
-    const absoluteProjectPath = path.resolve(projectPath);
+    let absoluteProjectPath = path.resolve(projectPath);
+
+    // Fix for Windows Docker mounting: ensure forward slashes and proper drive casing
+    if (os.platform() === 'win32') {
+        absoluteProjectPath = absoluteProjectPath.replace(/\\/g, '/');
+        // Ensure drive letter is lowercase (often required for WSL2/Docker backend)
+        if (absoluteProjectPath.match(/^[a-zA-Z]:\//)) {
+            absoluteProjectPath = absoluteProjectPath.charAt(0).toLowerCase() + absoluteProjectPath.slice(1);
+        }
+    }
+
+    console.log(`Spawning container with image: ${imageName} for path: ${absoluteProjectPath}`);
+
+    // Ensure image exists or pull it
+    try {
+        const image = docker.getImage(imageName);
+        const imageInfo = await image.inspect().catch(() => null);
+        if (!imageInfo) {
+            console.log(`Image ${imageName} not found locally, pulling...`);
+            await new Promise((resolve, reject) => {
+                docker.pull(imageName, (err: any, stream: any) => {
+                    if (err) return reject(err);
+                    docker.modem.followProgress(stream, onFinished, onProgress);
+                    function onFinished(err: any, output: any) {
+                        if (err) return reject(err);
+                        resolve(output);
+                    }
+                    function onProgress(event: any) {
+                        // console.log(event);
+                    }
+                });
+            });
+            console.log(`Image ${imageName} pulled successfully`);
+        }
+    } catch (pullError) {
+        console.error(`Error checking/pulling image ${imageName}:`, pullError);
+    }
 
     try {
         // Create container
         const container = await docker.createContainer({
             Image: imageName,
-            Cmd: ['/bin/bash'],
+            Cmd: ['/bin/sh'],
             Tty: true,
             OpenStdin: true,
             WorkingDir: '/workspace',
+            ExposedPorts: Object.keys(portBindings).reduce((acc, port) => ({ ...acc, [port]: {} }), {}),
             HostConfig: {
                 Binds: [`${absoluteProjectPath}:/workspace:rw`],
                 PortBindings: portBindings,
+                NetworkMode: 'bridge',
                 // Resource limits
                 Memory: 512 * 1024 * 1024, // 512MB
                 CpuShares: 256, // 25% of CPU
@@ -153,21 +228,37 @@ export async function spawnContainer(
                 'codeblocking.userId': userId,
                 'codeblocking.projectId': projectId,
             },
+            Env: [
+                'TERM=xterm-256color',
+                'PS1=\\u@\\h:\\w\\$ ',  // Set a clear prompt showing current directory
+            ],
         });
 
-        await container.start();
+        // Mark as pending so cleanup doesn't delete it
+        pendingContainerIds.add(container.id);
 
-        const info: ContainerInfo = {
-            containerId: container.id,
-            environment,
-            ports,
-            projectPath: absoluteProjectPath,
-        };
+        try {
+            await container.start();
 
-        activeContainers.set(key, info);
-        console.log(`Container started for ${key}: ${container.id.substring(0, 12)}`);
+            // Wait a brief moment to ensure container is fully up
+            await new Promise(resolve => setTimeout(resolve, 500));
 
-        return info;
+            const info: ContainerInfo = {
+                containerId: container.id,
+                environment,
+                ports,
+                projectPath: absoluteProjectPath,
+            };
+
+            activeContainers.set(key, info);
+            console.log(`Container started for ${key}: ${container.id.substring(0, 12)}`);
+            console.log(`Port mappings:`, Array.from(ports.entries()).map(([c, h]) => `${c}->${h}`).join(', '));
+
+            return info;
+        } finally {
+            // Remove from pending whether success or fail
+            pendingContainerIds.delete(container.id);
+        }
     } catch (error) {
         // Release ports if container creation failed
         ports.forEach((hostPort) => releasePort(hostPort));
@@ -229,7 +320,14 @@ export async function cleanupAllContainers(): Promise<void> {
         filters: { label: ['codeblocking.userId'] },
     });
 
+    const activeIds = new Set(Array.from(activeContainers.values()).map(c => c.containerId));
+
     for (const containerInfo of containers) {
+        // Skip if this container is currently active or pending
+        if (activeIds.has(containerInfo.Id) || pendingContainerIds.has(containerInfo.Id)) {
+            continue;
+        }
+
         try {
             const container = docker.getContainer(containerInfo.Id);
             await container.stop({ t: 1 });

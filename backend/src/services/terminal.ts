@@ -17,6 +17,11 @@ function getDockerSocket(): string {
         return desktopSocket;
     }
 
+    // Check for Windows named pipe
+    if (os.platform() === 'win32') {
+        return '//./pipe/docker_engine';
+    }
+
     return '/var/run/docker.sock';
 }
 
@@ -33,13 +38,37 @@ interface TerminalSession {
 const sessions: Map<string, TerminalSession> = new Map();
 
 export function initializeTerminalService(io: SocketIOServer): void {
+    // Middleware to authenticate socket connections
+    io.use(async (socket, next) => {
+        try {
+            const token = socket.handshake.auth?.token;
+            if (!token) {
+                return next(new Error('Authentication required'));
+            }
+
+            // Verify token with Supabase
+            const { supabaseAdmin } = await import('../lib/supabase.js');
+            const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
+
+            if (error || !user) {
+                return next(new Error('Invalid token'));
+            }
+
+            // Attach user to socket
+            socket.data.userId = user.id;
+            next();
+        } catch (error) {
+            next(new Error('Authentication failed'));
+        }
+    });
+
     io.on('connection', (socket: Socket) => {
         console.log('Terminal socket connected:', socket.id);
 
         socket.on('terminal:create', async (data: { projectId: string }) => {
             try {
-                // Get user info from socket auth
-                const userId = socket.handshake.auth?.userId || 'anonymous';
+                // Get user info from socket data (set by middleware)
+                const userId = socket.data.userId;
                 const projectId = data.projectId;
 
                 if (!projectId) {
@@ -47,27 +76,61 @@ export function initializeTerminalService(io: SocketIOServer): void {
                     return;
                 }
 
+                console.log(`Creating terminal for user ${userId}, project ${projectId}`);
+
                 // Get project path and environment
-                const projectPath = getProjectPath(projectId);
+                const projectPath = getProjectPath(userId, projectId);
+                console.log(`Project path: ${projectPath}`);
+
+                // Verify project directory exists
+                const fs = await import('fs');
+                if (!fs.existsSync(projectPath)) {
+                    socket.emit('terminal:error', { message: 'Project not found. Please open the project first.' });
+                    return;
+                }
+
+                // List files in project path for debugging
+                const files = fs.readdirSync(projectPath);
+                console.log(`Files in project path:`, files);
 
                 // Get or spawn container
                 let containerInfo = await getContainer(userId, projectId);
 
                 if (!containerInfo) {
-                    // Need project environment - default to 'base'
-                    const environment = socket.handshake.auth?.environment || 'base';
+                    // Auto-detect environment from project files
+                    const { detectEnvironment } = await import('./environment.js');
+                    const detected = detectEnvironment(projectPath);
+                    const environment = detected.environment;
+                    console.log(`Auto-detected environment: ${environment} (${detected.reason})`);
+
+                    console.log(`Spawning ${environment} container for ${userId}/${projectId}`);
                     containerInfo = await spawnContainer(userId, projectId, environment, projectPath);
+                } else {
+                    // Check if existing container has correct environment
+                    const { detectEnvironment } = await import('./environment.js');
+                    const detected = detectEnvironment(projectPath);
+
+                    if (containerInfo.environment !== detected.environment) {
+                        console.log(`Environment mismatch: ${containerInfo.environment} -> ${detected.environment}, restarting container`);
+                        await stopContainer(userId, projectId);
+                        containerInfo = await spawnContainer(userId, projectId, detected.environment, projectPath);
+                    }
                 }
 
                 const container = docker.getContainer(containerInfo.containerId);
 
                 // Create exec session for terminal
                 const exec = await container.exec({
-                    Cmd: ['/bin/bash'],
+                    Cmd: ['/bin/sh'],
                     AttachStdin: true,
                     AttachStdout: true,
                     AttachStderr: true,
                     Tty: true,
+                    WorkingDir: '/workspace', // Explicitly set working directory
+                    Env: [
+                        'TERM=xterm-256color',
+                        'PS1=\\u@\\h:\\w\\$ ' // Ensure prompt shows current directory
+                    ]
                 });
 
                 const stream = await exec.start({
@@ -105,6 +168,11 @@ export function initializeTerminalService(io: SocketIOServer): void {
                     socket.emit('terminal:error', { message: errorMessage || 'Stream error occurred' });
                 });
 
+                // Send initial command to show current directory
+                setTimeout(() => {
+                    stream.write('clear\n');
+                }, 100);
+
                 // Send port info to client
                 const ports: Record<number, number> = {};
                 containerInfo.ports.forEach((hostPort, containerPort) => {
@@ -124,14 +192,15 @@ export function initializeTerminalService(io: SocketIOServer): void {
             }
         });
 
-        socket.on('terminal:input', (data: string) => {
+        socket.on('terminal:input', (data: string | { data: string }) => {
             const session = sessions.get(socket.id);
             if (session?.stream) {
-                session.stream.write(data);
+                const input = typeof data === 'string' ? data : data.data;
+                if (input) session.stream.write(input);
             }
         });
 
-        socket.on('terminal:resize', (data: { cols: number; rows: number }) => {
+        socket.on('terminal:resize', (data: { cols: number; rows: number } | { cols: number; rows: number; terminalId?: string }) => {
             const session = sessions.get(socket.id);
             if (session?.exec) {
                 // Docker exec resize

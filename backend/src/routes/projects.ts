@@ -1,9 +1,14 @@
-import { Router } from 'express'
+import { Router, Response } from 'express'
+import multer from 'multer'
+import path from 'path'
 import { AuthenticatedRequest, authMiddleware } from '../middleware/auth.js'
 import { createUserClient } from '../lib/supabase.js'
-import { cloneRepository, deleteProject, getProjectPath } from '../services/git.js'
+import { cloneRepository, deleteProject, getProjectPath, createAndPushBranch, initAndPushRepo } from '../services/git.js'
+import { createRepo } from '../services/github.js'
 import { detectEnvironment } from '../services/environment.js'
 import * as fs from 'fs'
+
+const upload = multer({ storage: multer.memoryStorage() })
 
 const router = Router()
 
@@ -68,7 +73,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
 
         if (createError || !project) {
             console.error('Error creating project:', createError)
-            return res.status(500).json({ error: 'Failed to create project' })
+            return res.status(500).json({ error: 'Failed to create project', details: createError })
         }
 
         // Clone the repository
@@ -79,17 +84,17 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
                 req.user!.id,
                 project.id
             )
-        } catch (cloneError) {
+        } catch (cloneError: any) {
             console.error('Error cloning repository:', cloneError)
             // Delete the project record if clone failed
             await supabase.from('projects').delete().eq('id', project.id)
-            return res.status(500).json({ error: 'Failed to clone repository' })
+            return res.status(500).json({ error: 'Failed to clone repository', details: cloneError?.message || cloneError })
         }
 
         return res.status(201).json({ project })
-    } catch (error) {
+    } catch (error: any) {
         console.error('Error in POST /projects:', error)
-        return res.status(500).json({ error: 'Failed to create project' })
+        return res.status(500).json({ error: 'Failed to create project', details: error?.message || error })
     }
 })
 
@@ -149,6 +154,16 @@ router.get('/:id/open', async (req: AuthenticatedRequest, res) => {
             }
 
             await cloneRepository(project.repo_url, githubToken, req.user!.id, id)
+        } else {
+            // If already cloned, pull latest changes to stay in sync
+            try {
+                const { pullRepository } = await import('../services/git.js')
+                await pullRepository(projectPath, req.user!.providerToken)
+                console.log(`[GitService] Auto-pulled latest changes for project ${id}`)
+            } catch (pullError) {
+                console.error(`[GitService] Auto-pull failed for project ${id}:`, pullError)
+                // We don't block the opening if pull fails (e.g. offline or no new changes)
+            }
         }
 
         // Update last_opened
@@ -164,6 +179,111 @@ router.get('/:id/open', async (req: AuthenticatedRequest, res) => {
     } catch (error) {
         console.error('Error in GET /projects/:id/open:', error)
         return res.status(500).json({ error: 'Failed to open project' })
+    }
+})
+
+// POST /api/projects/:id/save - Save changes to a new branch on GitHub
+router.post('/:id/save', async (req: AuthenticatedRequest, res) => {
+    try {
+        const { id } = req.params
+        const { branchName, message } = req.body
+        const userId = req.user!.id
+
+        // Default branch name if not provided
+        const finalBranchName = branchName || `auto-save-${new Date().getTime()}`
+        const finalMessage = message || 'Automatic save from CodeForge Hub'
+
+        const projectPath = getProjectPath(userId, id)
+        if (!fs.existsSync(projectPath)) {
+            return res.status(404).json({ error: 'Project files not found' })
+        }
+
+        await createAndPushBranch(projectPath, finalBranchName, req.user!.providerToken, finalMessage)
+
+        return res.json({
+            success: true,
+            data: { branch: finalBranchName }
+        })
+    } catch (error: any) {
+        console.error('Error in POST /projects/:id/save:', error)
+        return res.status(500).json({
+            error: 'Failed to save to GitHub',
+            details: error?.message || error
+        })
+    }
+})
+
+// POST /api/projects/import - Import project from local files
+router.post('/import', upload.array('files'), async (req: any, res: Response) => {
+    try {
+        const { name, isPrivate, environment } = req.body
+        const files = req.files as any[]
+
+        if (!name || !files || files.length === 0) {
+            return res.status(400).json({ error: 'Missing required fields or files' })
+        }
+
+        const githubToken = req.user?.providerToken
+        if (!githubToken) {
+            return res.status(400).json({ error: 'GitHub token not available' })
+        }
+
+        const supabase = createUserClient(req.user!.accessToken)
+
+        // 1. Create GitHub Repo
+        let repo: any
+        try {
+            repo = await createRepo(githubToken, name, 'Project imported from local files', isPrivate === 'true')
+        } catch (repoError: any) {
+            console.error('Error creating GitHub repo:', repoError)
+            return res.status(500).json({ error: 'Failed to create GitHub repository', details: repoError.message })
+        }
+
+        // 2. Create project in database
+        const { data: project, error: createError } = await supabase
+            .from('projects')
+            .insert({
+                user_id: req.user!.id,
+                name,
+                repo_url: repo.html_url,
+                repo_full_name: repo.full_name,
+                is_private: repo.private,
+                environment: environment || 'base'
+            })
+            .select()
+            .single()
+
+        if (createError || !project) {
+            console.error('Error creating project in DB:', createError)
+            return res.status(500).json({ error: 'Failed to create project record', details: createError })
+        }
+
+        // 3. Save files to local workspace
+        const projectPath = getProjectPath(req.user!.id, project.id)
+        fs.mkdirSync(projectPath, { recursive: true })
+
+        for (const file of files) {
+            // Reconstruct path from originalname (which we expect to contain the relative path if passed correctly from frontend)
+            // Or use a custom header/body field for the path
+            const relativePath = file.originalname
+            const fullPath = path.join(projectPath, relativePath)
+
+            fs.mkdirSync(path.dirname(fullPath), { recursive: true })
+            fs.writeFileSync(fullPath, file.buffer)
+        }
+
+        // 4. Initialize Git and Push
+        try {
+            await initAndPushRepo(projectPath, repo.html_url, githubToken)
+        } catch (gitError: any) {
+            console.error('Error initializing git repo:', gitError)
+            return res.status(500).json({ error: 'Failed to initialize git repository', details: gitError.message })
+        }
+
+        return res.status(201).json({ project })
+    } catch (error: any) {
+        console.error('Error in POST /import:', error)
+        return res.status(500).json({ error: 'Failed to import project', details: error?.message || error })
     }
 })
 

@@ -1,8 +1,8 @@
-import 'dotenv/config'
+import 'dotenv/config' // Load environment variables - Reload for lowercase path fix3400 config
 import express from 'express'
 import cors from 'cors'
 import { createServer } from 'http'
-import { Server as SocketIOServer } from 'socket.io'
+import { Server } from 'socket.io'
 import githubRoutes from './routes/github.js'
 import projectsRoutes from './routes/projects.js'
 import filesRoutes from './routes/files.js'
@@ -11,11 +11,11 @@ import { cleanupAllContainers } from './services/container.js'
 
 const app = express()
 const httpServer = createServer(app)
-const PORT = process.env.PORT || 3001
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000'
+const PORT = process.env.PORT || 4001
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:4000'
 
 // Socket.IO setup
-const io = new SocketIOServer(httpServer, {
+const io = new Server(httpServer, {
     cors: {
         origin: FRONTEND_URL,
         methods: ['GET', 'POST'],
@@ -35,9 +35,11 @@ app.use(cors({
 app.use(express.json())
 
 // Health check
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
+    const dockerStatus = await import('./services/container.js').then(m => m.pingDocker());
     res.json({
-        status: 'ok',
+        status: dockerStatus ? 'ok' : 'error',
+        docker: dockerStatus ? 'connected' : 'disconnected',
         timestamp: new Date().toISOString(),
         terminals: getActiveSessionCount()
     })
@@ -66,6 +68,9 @@ process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
 
 // Start server
+// Cleanup orphaned containers on startup
+cleanupAllContainers().catch(console.error);
+
 httpServer.listen(PORT, () => {
     console.log(`🚀 Backend server running on http://localhost:${PORT}`)
     console.log(`   Frontend URL: ${FRONTEND_URL}`)
